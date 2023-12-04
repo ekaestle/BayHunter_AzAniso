@@ -52,7 +52,7 @@ class BayWatcher(object):
         self.refmodel = data_pars.get('refmodel', dict())
 
         self.capacity = capacity
-        self.modellength = int(self.priors['layers'][1] + 1) * 2
+        self.modellength = int(self.priors['layers'][1] + 1) * 4
         self.vs_step = np.ones((capacity, self.modellength)) * np.nan
         self.dep_step = np.ones((capacity, self.modellength)) * np.nan
         self.likes = np.ones((capacity)) * np.nan
@@ -68,7 +68,7 @@ class BayWatcher(object):
         self.targetrefs = [target.ref for target in self.targets]
         self.ntargets = len(self.targets)
 
-        self.noises = np.ones((self.capacity, self.ntargets*2)) * np.nan
+        self.noises = np.ones((self.capacity, self.ntargets*4)) * np.nan
         self.init_style_dicts()
         self.init_plot()
         self.init_arrays()
@@ -105,7 +105,7 @@ class BayWatcher(object):
         segments = [np.column_stack([x, y])
                     for x, y in zip(self.vs_step, self.dep_step)]
 
-        lc = LineCollection(segments, cmap='plasma_r')
+        lc = LineCollection(segments, cmap='viridis_r')
         lc.set_array(np.asarray(colors))
 
         self.modelcollection = self.axes[0].add_collection(lc)
@@ -124,7 +124,7 @@ class BayWatcher(object):
         a = np.repeat(([0, 1], ), self.capacity, axis=0)
         b = np.array([[v]*2 for v in self.vpvss])
         segments = [np.column_stack([x, y]) for x, y in zip(b, a)]
-        lc = LineCollection(segments, cmap='plasma_r')
+        lc = LineCollection(segments, cmap='viridis_r')
         lc.set_array(np.asarray(colors))
 
         self.vpvscollection = self.axes[5].add_collection(lc)
@@ -239,11 +239,11 @@ class BayWatcher(object):
 
         # reference model
         dep, vs = self.refmodel.get('model', ([np.nan], [np.nan]))
-        noise = self.refmodel.get('noise', [np.nan, np.nan])[1::2]
+        noise = self.refmodel.get('noise', [np.nan, np.nan])[1::4]
         explike = self.refmodel.get('explike', np.nan)
         vpvs = self.refmodel.get('vpvs', np.nan)
 
-        self.axes[0].plot(vs, dep, color='k', ls=':')
+        self.axes[0].plot(vs, dep, color='magenta', ls='-',lw=2)
         self.axes[5].axvline(vpvs, color='k', ls=':')
         self.axes[3].axhline(explike, color='darkblue', ls=':')
 
@@ -338,7 +338,7 @@ class BayWatcher(object):
         for i, model in enumerate(self.modelmatrix):
             # if nan model, the first element is also nan !
             if ~np.isnan(model[0]):
-                vp, vs, dep = Model.get_stepmodel(model, vpvs=self.vpvss[i], mantle=self.mantle)
+                vp, vs, psi2amp, psi2azi, dep = Model.get_stepmodel(model, vpvs=self.vpvss[i], mantle=self.mantle)
                 dep[-1] = self.priors['z'][-1] * 1.5
 
                 self.vs_step = np.roll(self.vs_step, -1, axis=0)  # rolling up models
@@ -356,7 +356,7 @@ class BayWatcher(object):
                 lastvpvs = self.vpvss[-1]
 
         # immediately update data fit lines
-        vp, vs, h = Model.get_vp_vs_h(lastmodel, vpvs=lastvpvs, mantle=self.mantle)
+        vp, vs, h, psi2amp, psi2azi = Model.get_vp_vs_h(lastmodel, vpvs=lastvpvs, mantle=self.mantle)
         ymod = self.compute_synth(h, vs, vp)
 
         for i, tline in enumerate(self.targetlines):
@@ -381,10 +381,10 @@ class BayWatcher(object):
             if sline is not None:
                 ref = self.targetrefs[i]
                 idx = self.targetrefs.index(ref)
-                sline.set_ydata(self.noises.T[1::2][idx])
+                sline.set_ydata(self.noises.T[1::4][idx])
 
-        self.axes[4].set_ylim([np.nanmin(self.noises.T[1::2])*0.98,
-                               np.nanmax(self.noises.T[1::2])*1.02])
+        self.axes[4].set_ylim([np.nanmin(self.noises.T[1::4])*0.98,
+                               np.nanmax(self.noises.T[1::4])*1.02])
         self.fig.canvas.draw_idle()
 
     def compute_synth(self, h, vs, vp):
@@ -401,8 +401,13 @@ class BayWatcher(object):
                 moddata.append(np.nan)
                 continue
             else:
-                _, ymod = target.moddata.plugin.run_model(
-                    h=h, vp=vp, vs=vs, rho=rho)
+                mod = target.moddata.plugin.run_model(
+                    h=h, vp=vp, vs=vs, rho=rho,
+                    c1=np.zeros(len(h)), c2=np.zeros(len(h)))
+                if len(mod)==4:
+                    _, ymod, _, _ = mod
+                else:
+                    _, ymod = mod
                 moddata.append(ymod)
 
         return moddata
@@ -410,7 +415,7 @@ class BayWatcher(object):
     def init_arrays(self):
         models = np.ones((self.capacity, self.modellength)) * np.nan
         likes = np.ones((self.capacity)) * np.nan
-        noises = np.ones((self.capacity, self.ntargets*2)) * np.nan
+        noises = np.ones((self.capacity, self.ntargets*4)) * np.nan
         vpvss = np.ones((self.capacity)) * np.nan
 
         self.chainarrays = []
@@ -484,7 +489,7 @@ class BayWatcher(object):
 
     def update_models(self, model, vpvs):
         logger.debug('### Found new chain model')
-        vp, vs, dep = Model.get_stepmodel(model, vpvs=vpvs, mantle=self.mantle)
+        vp, vs, psi2amp, psi2azi, dep = Model.get_stepmodel(model, vpvs=vpvs, mantle=self.mantle)
 
         self.vs_step = np.roll(self.vs_step, -1, axis=0)  # rolling up models
         nantmp = np.ones(self.modellength) * np.nan
@@ -496,7 +501,7 @@ class BayWatcher(object):
         nantmp[:dep.size] = dep
         self.dep_step[-1] = nantmp
 
-        vp, vs, h = Model.get_vp_vs_h(model, vpvs=vpvs, mantle=self.mantle)
+        vp, vs, h, psi2amp, psi2azi = Model.get_vp_vs_h(model, vpvs=vpvs, mantle=self.mantle)
         ymod = self.compute_synth(h, vs, vp)
 
         for i, tline in enumerate(self.targetlines):
@@ -517,7 +522,7 @@ class BayWatcher(object):
         self.likes[-1] = like
         self.likeline.set_ydata(self.likes)
         self.axes[3].set_ylim([np.nanmin(self.likes)*0.999,
-                               np.nanmax(self.likes)*1.001])    
+                               np.nanmax(self.likes)*1.001])
 
     def update_vpvss(self, vpvs):
         self.vpvss = np.roll(self.vpvss, -1)
@@ -531,10 +536,10 @@ class BayWatcher(object):
             if sline is not None:
                 ref = self.targetrefs[i]
                 idx = self.targetrefs.index(ref)
-                sline.set_ydata(self.noises.T[1::2][idx])
+                sline.set_ydata(self.noises.T[1::4][idx])
 
-        self.axes[4].set_ylim([np.nanmin(self.noises.T[1::2])*0.98,
-                               np.nanmax(self.noises.T[1::2])*1.02])
+        self.axes[4].set_ylim([np.nanmin(self.noises.T[1::4])*0.98,
+                               np.nanmax(self.noises.T[1::4])*1.02])
 
     def watch(self):
         self.chainidx = 0

@@ -57,7 +57,6 @@ def string_decode(section):
 
 def load_params(initfile):
     config = ConfigObj(initfile)
-    keywords = ['station', 'savepath']
     params = []
     for configsection in config.sections:
         if configsection == 'datapaths':

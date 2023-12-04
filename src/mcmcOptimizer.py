@@ -10,7 +10,7 @@ import os
 import time
 import os.path as op
 import numpy as np
-
+from distutils.dir_util import copy_tree,remove_tree
 
 import matplotlib.pyplot as plt
 import multiprocessing as mp
@@ -46,8 +46,10 @@ class MCMC_Optimizer(object):
         self.station = self.initparams.get('station')
 
         savepath = op.join(self.initparams['savepath'], 'data')
-        if not op.exists(savepath):
-            os.makedirs(savepath)
+        if op.exists(savepath):
+            copy_tree(savepath,savepath+" "+time.asctime())
+            remove_tree(savepath)
+        os.makedirs(savepath)
 
         # save file for offline-plotting
         outfile = op.join(savepath, '%s_config.pkl' % self.station)
@@ -67,6 +69,10 @@ class MCMC_Optimizer(object):
         # shared data and chains
         self._init_shareddata()
 
+        # parallel tempering (optional)
+        self.parallel_tempering = self.initparams['parallel_tempering']
+        self._init_parallel_tempering(self.parallel_tempering)
+
         logger.info('> %d chain(s) are initiated ...' % self.nchains)
 
         self.chains = []
@@ -85,12 +91,14 @@ class MCMC_Optimizer(object):
         dtype = np.float32
 
         acceptance = np.max(self.initparams['acceptance']) / 100.
-        accepted_models = int(self.iterations * acceptance)
-        self.nmodels = accepted_models  # 'iterations'
+        accepted_models = int(self.iterations * (acceptance+0.05))
+        self.nmodels = accepted_models # 'iterations'
+        # adding some more models, since chains have usually a 
+        # higher acceptance ratio at the beginning
 
         # models
         self.sharedmodels = sharedctypes.RawArray(
-            'f', self.nchains * (self.nmodels * self.maxlayers * 2))
+            'f', self.nchains * (self.nmodels * self.maxlayers * 4))
         modeldata = np.frombuffer(self.sharedmodels, dtype=dtype)
         modeldata.fill(np.nan)
         memory += modeldata.nbytes
@@ -109,10 +117,19 @@ class MCMC_Optimizer(object):
         likedata.fill(np.nan)
         memory += likedata.nbytes
 
+        # current likelihood (otherwise to slow to find the last
+        # not nan value in lself.sharedlikes)
+        self.sharedlikes_current = sharedctypes.RawArray(
+            'f', self.nchains)
+        likes_curr = np.frombuffer(self.sharedlikes_current,
+                                   dtype=dtype)
+        likes_curr.fill(np.nan)
+        memory += likes_curr.nbytes
+
         # noise hyper-parameters, which are for each target two:
         # noise correlation r, noise amplitudes sigma
         self.sharednoise = sharedctypes.RawArray(
-            'f', self.nchains * self.nmodels * self.ntargets*2)
+            'f', self.nchains * self.nmodels * self.ntargets*4)
         noisedata = np.frombuffer(self.sharednoise, dtype=dtype)
         noisedata.fill(np.nan)
         memory += noisedata.nbytes
@@ -124,6 +141,13 @@ class MCMC_Optimizer(object):
         vpvsdata.fill(np.nan)
         memory += vpvsdata.nbytes
 
+        # temperatures (has to be as large as the total number of iterations)
+        self.sharedtemperatures = sharedctypes.RawArray(
+            'f', self.nchains * self.iterations)
+        temperatures = np.frombuffer(self.sharedtemperatures, dtype=dtype)
+        temperatures.fill(np.nan)
+        memory += temperatures.nbytes
+
         memory = np.ceil(memory / 1e6)
         logger.info('... they occupy ~%d MB memory.' % memory)
 
@@ -133,9 +157,84 @@ class MCMC_Optimizer(object):
             initparams=self.initparams, sharedmodels=self.sharedmodels,
             sharedmisfits=self.sharedmisfits, sharedlikes=self.sharedlikes,
             sharednoise=self.sharednoise, sharedvpvs=self.sharedvpvs,
+            sharedtemperatures=self.sharedtemperatures,nmodels=self.nmodels,
+            sharedlikes_current=self.sharedlikes_current,
             random_seed=self.rstate.randint(1000))
 
         return chain
+
+    def _init_parallel_tempering(self,tempering):
+
+        sharedtemperatures = np.frombuffer(self.sharedtemperatures, dtype=np.float32).\
+            reshape((self.nchains,self.iterations))
+
+        if tempering:
+            self.temperatures = sharedtemperatures
+            temperatures = self._create_temperature_ladder(
+                self.initparams["t1chains"], self.initparams["maxtemp"])
+            self.temperatures[:,0] = temperatures
+            self.likelihoods = np.frombuffer(self.sharedlikes_current,
+                                             dtype=np.float32)
+            self.accepted_temperature_swaps = 0
+            self.total_temperature_swaps = 0
+            self.accrate_temp_swaps = np.zeros(100)
+        else:
+            sharedtemperatures[:,:] = 1.
+
+    def _create_temperature_ladder(self, t1chains, maxtemp):
+
+        if t1chains > self.nchains:
+            logger.warning("The number of chains running at T=1 is "+
+                "larger than the total number of chains. All chains "+
+                "will run at temperature 1.")
+            t1chains = self.nchains
+
+        temperatures = np.ones(self.nchains)
+        if t1chains == self.nchains:
+            return temperatures
+
+        temperatures[t1chains-1:] = np.logspace(np.log10(1),np.log10(maxtemp),
+                                                self.nchains-t1chains+1)
+
+        return temperatures
+
+    def _swap_temperatures(self,iiter):
+
+        temps = self.temperatures[:,iiter-1]
+        likes = self.likelihoods
+
+        # temperatures at the next iteration are the same as current
+        # unless swap is accepted (below)
+        self.temperatures[:,iiter] = temps
+
+        chains = np.arange(self.nchains,dtype=int)
+        self.rstate.shuffle(chains)
+        
+        # swap between random pairs of chains
+        for pair in chains[:int(len(chains)/2.)*2].reshape(int(len(chains)/2),2):
+
+            # no swap if temperatures are identical
+            if temps[pair[0]] == temps[pair[1]]:
+                continue
+
+            # check if the two temperature levels are adjacent
+            if np.diff(np.where(np.isin(np.unique(temps),[temps[pair[0]],temps[pair[1]]]))[0])[0] == 1:
+                adjacent = True
+                self.accrate_temp_swaps[0] = 0
+            else:
+                adjacent = False
+
+            u = np.log(self.rstate.uniform(0, 1))
+            alpha = (likes[pair[1]]-likes[pair[0]]) * (1./temps[pair[0]] - 1./temps[pair[1]])
+            if u <= alpha:
+                self.temperatures[pair[0],iiter] = temps[pair[1]]
+                self.temperatures[pair[1],iiter] = temps[pair[0]]
+                if adjacent:
+                    self.accrate_temp_swaps[0] = 1
+                self.accepted_temperature_swaps += 1
+            self.total_temperature_swaps += 1
+            self.accrate_temp_swaps = np.roll(self.accrate_temp_swaps,1)
+
 
     def monitor_process(self, dtsend):
         """Create a socket and send array data. Only active for baywatch."""
@@ -148,11 +247,11 @@ class MCMC_Optimizer(object):
         logger.info('Starting monitor process on %s...' % self.sock_addr)
 
         models = np.frombuffer(self.sharedmodels, dtype=dtype) \
-            .reshape((self.nchains, self.nmodels, self.maxlayers*2))
+            .reshape((self.nchains, self.nmodels, self.maxlayers*4))
         likes = np.frombuffer(self.sharedlikes, dtype=dtype) \
             .reshape((self.nchains, self.nmodels))
         noise = np.frombuffer(self.sharednoise, dtype=dtype) \
-            .reshape((self.nchains, self.nmodels, self.ntargets*2))
+            .reshape((self.nchains, self.nmodels, self.ntargets*4))
         vpvs = np.frombuffer(self.sharedvpvs, dtype=dtype) \
             .reshape((self.nchains, self.nmodels))
 
@@ -205,21 +304,55 @@ class MCMC_Optimizer(object):
         def idxsort(chain):
             return chain.chainidx
 
-        def gochain(chainidx):
-            chain = self.chains[chainidx]
-            chain.run_chain()
+        def gochain(threadno,worklist,barrier):
 
-            # reset to None, otherwise pickling error
-            for target in chain.targets.targets:
-                target.get_covariance = None
+            iiter = 0
+            while True:
+                chains_done = 0
+                for chainidx in worklist:
+                    chain = self.chains[chainidx]
+                    if chain.iiter < chain.iter_phase2:
+                        chain.iterate()
+                    else:
+                        chains_done += 1
+
+                iiter += 1
+
+                if chains_done == len(worklist):
+                    break
+
+                if self.parallel_tempering and iiter<self.iterations:
+                    barrier.wait() # wait for all chains
+                    if threadno==1:
+                        self._swap_temperatures(iiter)
+                        if iiter%5000 == 0:
+                            logger.info("Accepted temperature swaps: %d / %d (Acceptance rate adjacent temp. levels: %d%%)" %(
+                                self.accepted_temperature_swaps, self.total_temperature_swaps,
+                                np.sum(self.accrate_temp_swaps)))
+                    # make all threads wait until swap is finished
+                    barrier.wait()
+
+            for chainidx in worklist:
+                chain = self.chains[chainidx]
+                chain.finalize()
+            
+                # reset to None, otherwise pickling error
+                for target in chain.targets.targets:
+                    target.get_covariance = None
 
             self.chainlist.append(chain)
+
 
         # multi processing - parallel chains
         if nthreads == 0:
             nthreads = mp.cpu_count()
-
-        worklist = list(np.arange(self.nchains)[::-1])
+        if self.nchains+baywatch < nthreads:
+            nthreads = self.nchains+baywatch
+            logger.info("Reducing number of threads to %d." %nthreads)
+            
+        # distribute the chains equally among worker threads
+        # if baywatch, use one thread for baywatch process
+        worklist = [list(np.arange(self.nchains)[i::nthreads-baywatch]) for i in range(nthreads-baywatch)]
 
         self.chainlist = self.manager.list()
         self.alive = []
@@ -231,25 +364,20 @@ class MCMC_Optimizer(object):
                 target=self.monitor_process,
                 kwargs={'dtsend': dtsend})
             monitor.start()
-
-        # logger.info('iteration | layers | RMS misfit | ' +
-        #             'likelihood | duration | acceptance')
-
-        while True:
-            if len(mp.active_children()) > nthreads:
-                time.sleep(.5)
-                continue
-
-            if len(worklist) == 0:
-                break
-
-            chainidx = worklist.pop()
-            logger.info('> Sending out chain %s' % chainidx)
-            p = mp.Process(name='chain %d' % chainidx, target=gochain,
-                           kwargs={'chainidx': chainidx})
-
+        
+        barrier = mp.Barrier(nthreads)
+        for i,chains in enumerate(worklist):
+            thread_no = i+1
+            logger.info('> Thread %d working on chain(s) ' %(thread_no) + 
+                        ' '.join([str(ch) for ch in chains]))
+            p = mp.Process(name='Thread %d' %thread_no, target=gochain,
+                           kwargs={'threadno': thread_no, 'worklist': chains,'barrier': barrier})
             self.alive.append(p)
             p.start()
+
+        logger.info('Chain No. (temp.): ' +
+                    'iteration  layers  RMS misfit  ' +
+                    'likelihood | duration | acceptance rates (total)')
 
         # wait for chains to finish
         while True:

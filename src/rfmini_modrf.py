@@ -72,7 +72,7 @@ class RFminiModRF(object):
                    'qp': qp, 'qs': qs}
         mparams = dict((a, b) for (a, b) in mparams.items()
                        if b is not None)
-        pars = mparams.keys()
+        pars = list(mparams.keys())
 
         nkey = 0
         header = []

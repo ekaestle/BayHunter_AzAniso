@@ -9,6 +9,7 @@
 import logging
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
 
 logger = logging.getLogger()
 
@@ -21,14 +22,29 @@ class ObservedData(object):
     y = y(x)
 
     """
-    def __init__(self, x, y, yerr=None):
+    def __init__(self, x, y, yerr=None, c1=None, c1_err=None, c2=None, c2_err=None):
         self.x = x
+        # in general, y is the same size as x. But in the case of azimuthal anisotropy
+        # y is the phase velocity for different propagation directions and therefore
+        # a longer vector (depending on SingleTarget.azimuths, see below)
         self.y = y
         self.yerr = yerr
+        self.c1 = c1
+        self.c1_err = c1_err
+        self.c2 = c2
+        self.c2_err = c2_err
+        if c1 is not None and c2 is not None:
+            self.aa_amp = np.sqrt(c1**2+c2**2)
+            self.aa_ang = 0.5*np.arctan2(c2,c1)
+        else:
+            self.aa_amp = self.aa_ang = None
 
         if self.yerr is None or np.any(yerr<=0.) or np.any(np.isnan(yerr)):
-            self.yerr = np.ones(x.size) * np.nan
-
+            self.yerr = np.ones(x.size) * 1e-5
+        if self.c1_err is None or np.any(c1_err<=0.) or np.any(np.isnan(c1_err)):
+            self.c1_err = np.ones(x.size) * 1e-5
+        if self.c2_err is None or np.any(c2_err<=0.) or np.any(np.isnan(c2_err)):
+            self.c2_err = np.ones(x.size) * 1e-5
 
 class ModeledData(object):
     """
@@ -48,9 +64,10 @@ class ModeledData(object):
     necessary plugin structure and method names in the defaults folder.
     Get inspired by the source code of the existing plugins.
     """
-    def __init__(self, obsx, ref):
+    def __init__(self, obsx, ref, azimuthal_anisotropic=False):
         rf_targets = ['prf', 'srf']
         swd_targets = ['rdispph', 'ldispph', 'rdispgr', 'ldispgr']
+        self.azimuthal_anisotropic = azimuthal_anisotropic
 
         if ref in rf_targets:
             from BayHunter.rfmini_modrf import RFminiModRF
@@ -59,7 +76,7 @@ class ModeledData(object):
 
         elif ref in swd_targets:
             from BayHunter.surf96_modsw import SurfDisp
-            self.plugin = SurfDisp(obsx, ref)
+            self.plugin = SurfDisp(obsx, ref, azimuthal_anisotropic=self.azimuthal_anisotropic)
             self.xlabel = 'Period in s'
 
         else:
@@ -77,10 +94,45 @@ class ModeledData(object):
 
     def calc_synth(self, h, vp, vs, **kwargs):
         """ Call forward modeling method of plugin."""
-        rho = kwargs.pop('rho')
+        if self.azimuthal_anisotropic:
+            # y is the isotropic phase velocity
+            # c1 is the x component of the anisotropic phase velocity
+            # c2 is the y component ...
+            self.x, self.y, self.c1, self.c2 = self.plugin.run_model(h, vp, vs, **kwargs)
+            self.aa_amp = np.sqrt(self.c1**2+self.c2**2)
+            self.aa_ang = 0.5*np.arctan2(self.c2,self.c1)
+        else:
+            self.x, self.y = self.plugin.run_model(h, vp, vs, **kwargs)
 
-        self.x, self.y = self.plugin.run_model(h, vp, vs, rho=rho, **kwargs)
+    #def get_anisotropy(self):
+    #    if not self.azimuthal_anisotropic:
+    #        return self.y,None,None
+    #    def aniso_fitting_function(azi,A2,PHI2):
+    #        return A2*np.cos(2*(azi-PHI2))
+    #    def fit_anisotropy(azis,vels):
+    #        popt,pcov = curve_fit(aniso_fitting_function,azis,vels,bounds=([0,-np.pi/2.],[20,np.pi/2.]))
+    #        return popt
+    #    phvels = np.column_stack(np.split(self.y,len(self.azimuths)))
+    #    phvel_iso = np.zeros(len(self.x))
+    #    aniso_amp = np.zeros(len(self.x))
+    #    aniso_azi = np.zeros(len(self.x))
+    #    for i,period in enumerate(self.x):
+    #        phvel_iso[i] = np.mean(phvels[i])
+    #        phvels_rel = (phvels[i]-np.mean(phvels[i]))/np.mean(phvels[i])*100.
+    #        amp,azi = fit_anisotropy(self.azimuths,phvels_rel)
+    #        aniso_amp[i] = amp
+    #        aniso_azi[i] = azi
+    #    return phvel_iso,aniso_amp,aniso_azi
 
+
+
+# plt.figure()
+# syny = np.split(t1.moddata.y,12)
+# obsy = np.split(t1.obsdata.y,12)
+# for ki in range(len(syny)):
+#     plt.plot(syny[ki],'k')
+#     plt.plot(obsy[ki])
+# plt.savefig("testplot.pdf",bbox_inches='tight')
 
 class Valuation(object):
     """
@@ -97,9 +149,13 @@ class Valuation(object):
         self.likelihood = None
 
     @staticmethod
-    def get_rms(yobs, ymod):
+    def get_rms(yobs, ymod, angles=False):
         """Return root mean square."""
-        rms = np.sqrt(np.mean((ymod - yobs)**2))
+        ydiff = ymod - yobs
+        if angles:
+            ydiff = np.abs(ydiff)
+            ydiff[ydiff>np.pi/2.] -= np.pi
+        rms = np.sqrt(np.mean(ydiff**2))
         return rms
 
     @staticmethod
@@ -173,9 +229,12 @@ class Valuation(object):
         return c_inv, logc_det
 
     @staticmethod
-    def get_likelihood(yobs, ymod, c_inv, logc_det):
+    def get_likelihood(yobs, ymod, c_inv, logc_det, angles=False):
         """Return log-likelihood."""
         ydiff = ymod - yobs
+        if angles:
+            ydiff = np.abs(ydiff)
+            ydiff[ydiff>np.pi/2.] -= np.pi
         madist = (ydiff.T).dot(c_inv).dot(ydiff)  # Mahalanobis distance
         logL_part = -0.5 * (yobs.size * np.log(2*np.pi) + logc_det)
         logL = logL_part - madist / 2.
@@ -189,10 +248,26 @@ class SingleTarget(object):
     likelihood, and also a plotting method. These can be used when initiating
     and testing your targets.
     """
-    def __init__(self, x, y, ref, yerr=None):
+    def __init__(self, x, y, ref, yerr=None, c1=None, c1err=None, c2=None, c2err=None):
         self.ref = ref
-        self.obsdata = ObservedData(x=x, y=y, yerr=yerr)
-        self.moddata = ModeledData(obsx=x, ref=ref)
+        self.azimuthal_anisotropic=False
+        if c1 is not None and c2 is not None:
+            if ref.startswith('l'):
+                print("Azimuthal anisotropy is currently not implemented for Love waves. The azimuthal anisotropy will be ignored for this target.")
+                c1 = c2 = None
+            elif ref.endswith('gr'):
+                print("Azimuthal anisotropy is currently not implemented for group velocities. The azimuthal anisotropy will be ignored for this target.")
+                c1 = c2 = None
+        if c1 is not None and c2 is not None:
+            #if np.max(np.abs(psi2azi))>2*np.pi:
+            #    raise Exception("fast axis direction larger than 2pi; angles should be given in radians!")
+            # normalization to [-pi/2,pi/2]
+            #psi2azi_normed = 0.5*np.arctan2(np.sin(2*psi2azi),np.cos(2*psi2azi))
+            self.azimuthal_anisotropic=True
+        #else:
+        #    psi2azi_normed=psi2azi
+        self.obsdata = ObservedData(x=x, y=y, yerr=yerr, c1=c1, c1_err=c1err, c2=c2, c2_err=c2err)
+        self.moddata = ModeledData(obsx=x, ref=ref, azimuthal_anisotropic=self.azimuthal_anisotropic)
         self.valuation = Valuation()
 
         logger.info("Initiated target: %s (ref: %s)"
@@ -208,7 +283,7 @@ class SingleTarget(object):
             return False
         if not np.sum(self.obsdata.x - self.moddata.x) <= 1e-5:
             return False
-        if not len(self.obsdata.y) == len(self.moddata.y):
+        if not np.shape(self.obsdata.y) == np.shape(self.moddata.y):
             return False
 
         return True
@@ -218,67 +293,138 @@ class SingleTarget(object):
             self.valuation.misfit = 1e15
             return
 
-        self.valuation.misfit = self.valuation.get_rms(
-            self.obsdata.y, self.moddata.y)
+        if self.azimuthal_anisotropic:
+            self.valuation.misfit = 0.
+            self.valuation.misfit += self.valuation.get_rms(
+                self.obsdata.y, self.moddata.y)
+            self.valuation.misfit += self.valuation.get_rms(
+                self.obsdata.c1, self.moddata.c1)
+            self.valuation.misfit += self.valuation.get_rms(
+                self.obsdata.c2, self.moddata.c2)
+        else:
+            self.valuation.misfit = self.valuation.get_rms(
+                self.obsdata.y, self.moddata.y)
 
-    def calc_likelihood(self, c_inv, logc_det):
+    def calc_likelihood(self, noise):
         if not self._moddata_valid():
             self.valuation.likelihood = -1e15
             return
 
-        self.valuation.likelihood = self.valuation.get_likelihood(
-            self.obsdata.y, self.moddata.y, c_inv, logc_det)
+        corr,sigma1,sigma2,sigma3 = noise # 3 sigmas for the anisotropic stds
+        if self.azimuthal_anisotropic:
+            self.valuation.likelihood = 0.
 
-    def plot(self, ax=None, mod=True):
+            c_inv, logc_det = self.get_covariance(
+                sigma=sigma1, size=self.obsdata.y.size, 
+                yerr=self.obsdata.yerr, corr=corr)
+            self.valuation.likelihood += self.valuation.get_likelihood(
+                self.obsdata.y, self.moddata.y, c_inv, logc_det)
+
+            c_inv, logc_det = self.get_covariance(
+                sigma=sigma2, size=self.obsdata.c1.size, 
+                yerr=self.obsdata.c1_err, corr=corr)
+            self.valuation.likelihood += self.valuation.get_likelihood(
+                self.obsdata.c1, self.moddata.c1, c_inv, logc_det)
+
+            c_inv, logc_det = self.get_covariance(
+                sigma=sigma3, size=self.obsdata.c2.size, 
+                yerr=self.obsdata.c2_err, corr=corr)
+            self.valuation.likelihood += self.valuation.get_likelihood(
+                self.obsdata.c2, self.moddata.c2, c_inv, logc_det)
+
+        else:
+            c_inv, logc_det = self.get_covariance(
+                sigma=sigma1, size=self.obsdata.y.size, 
+                yerr=self.obsdata.yerr, corr=corr)
+            self.valuation.likelihood = self.valuation.get_likelihood(
+                self.obsdata.y, self.moddata.y, c_inv, logc_det)
+
+    def plot(self, ax=None, mod=True, aziamp=True):
+        axes=ax
         if ax is None:
-            fig, ax = plt.subplots()
-
-        # ax.plot(self.obsdata.x, self.obsdata.y, label='obs',
-        #         marker='x', ms=1, color='blue', lw=0.8, zorder=1000)
-        ax.errorbar(self.obsdata.x, self.obsdata.y, yerr=self.obsdata.yerr,
-                    label='obs', marker='x', ms=1, color='blue', lw=0.8,
+            if self.azimuthal_anisotropic:
+                fig, axes = plt.subplots(figsize=(20,3.5),ncols=3)
+                ax = axes[0]
+                ax2 = axes[1]
+                ax3 = axes[2]
+            else:
+                fig,ax = plt.subplots()
+                axes = ax
+        elif type(ax)==type(np.array([])):
+            ax = axes[0]
+            ax2 = axes[1]
+            ax3 = axes[2]
+        
+        y = self.obsdata.y
+        ax.errorbar(self.obsdata.x, y, yerr=self.obsdata.yerr,
+                    label='obs', marker='x', ms=6, color='blue', lw=0.8,
                     elinewidth=0.7, zorder=1000)
+        if self.azimuthal_anisotropic and aziamp:
+            ax2.plot(self.obsdata.x,self.obsdata.aa_amp*100,
+                     label='obs',marker='x',ms=6, color='blue', lw=0.8, zorder=1000)
+            ax2.set_xlabel(self.moddata.xlabel)
+            ax2.set_ylabel("Anisotropic amplitude in %")
+            ax3.plot(self.obsdata.x,self.obsdata.aa_ang/np.pi*180,
+                     marker='x',label='obs',ms=6, color='blue', zorder=1000)
+            ax3.set_xlabel(self.moddata.xlabel)
+            ax3.set_ylabel("Anisotropic azimuths (math. deg)")
+            ax3.set_ylim(-90,90)
+        elif self.azimuthal_anisotropic and not aziamp:
+            ax2.errorbar(self.obsdata.x,self.obsdata.c1,yerr=self.obsdata.c1_err,
+                         label='obs',marker='x',ms=6, color='blue', lw=0.8, zorder=1000)
+            ax2.set_xlabel(self.moddata.xlabel)
+            ax2.set_ylabel("C1")
+            ax3.errorbar(self.obsdata.x,self.obsdata.c2,yerr=self.obsdata.c2_err,
+                         label='obs',marker='x',ms=6, color='blue', lw=0.8, zorder=1000)
+            ax3.set_xlabel(self.moddata.xlabel)
+            ax3.set_ylabel("C2")
 
         if mod:
-            ax.plot(self.moddata.x, self.moddata.y, label='mod',
+            ymod = self.moddata.y
+            if self.azimuthal_anisotropic:
+                ax2.plot(self.moddata.x, self.moddata.c1, label='mod',
+                         marker='o',  ms=1, color='red', lw=0.7, alpha=0.5)
+                ax3.plot(self.moddata.x, self.moddata.c2,'o', label='mod',
+                         ms=1, color='red', alpha=0.5)
+            ax.plot(self.moddata.x, ymod, label='mod',
                     marker='o',  ms=1, color='red', lw=0.7, alpha=0.5)
 
         ax.set_ylabel(self.ref)
         ax.set_xlabel(self.moddata.xlabel)
 
-        return ax
+        return axes
 
 
 class RayleighDispersionPhase(SingleTarget):
     noiseref = 'swd'
 
-    def __init__(self, x, y, yerr=None):
+    def __init__(self, x, y, yerr=None, c1=None, c1err=None, c2=None, c2err=None):
         ref = 'rdispph'
-        SingleTarget.__init__(self, x, y, ref, yerr=yerr)
+        SingleTarget.__init__(self, x, y, ref, yerr=yerr, c1=c1, c1err=c1err, c2=c2, c2err=c2err)
 
 
 class RayleighDispersionGroup(SingleTarget):
     noiseref = 'swd'
 
-    def __init__(self, x, y, yerr=None):
+    def __init__(self, x, y, yerr=None, c1=None, c1err=None, c2=None, c2err=None):
         ref = 'rdispgr'
-        SingleTarget.__init__(self, x, y, ref, yerr=yerr)
+        SingleTarget.__init__(self, x, y, ref, yerr=yerr, c1=c1, c1err=c1err, c2=c2, c2err=c2err)
 
 
 class LoveDispersionPhase(SingleTarget):
     noiseref = 'swd'
 
-    def __init__(self, x, y, yerr=None):
+    def __init__(self, x, y, yerr=None, c1=None, c1err=None, c2=None, c2err=None):
         ref = 'ldispph'
-        SingleTarget.__init__(self, x, y, ref, yerr=yerr)
+        SingleTarget.__init__(self, x, y, ref, yerr=yerr, c1=c1, c1err=c1err, c2=c2, c2err=c2err)
 
 
 class LoveDispersionGroup(SingleTarget):
     noiseref = 'swd'
 
-    def __init__(self, x, y, yerr=None):
+    def __init__(self, x, y, yerr=None, c1=None, c1err=None, c2=None, c2err=None):
         ref = 'ldispgr'
-        SingleTarget.__init__(self, x, y, ref, yerr=yerr)
+        SingleTarget.__init__(self, x, y, ref, yerr=yerr, c1=c1, c1err=c1err, c2=c2, c2err=c2err)
 
 
 class PReceiverFunction(SingleTarget):
@@ -317,10 +463,15 @@ class JointTarget(object):
         The jointlikelihood (here called the proposallikelihood) is the sum
         of the log-likelihoods from each target."""
         rho = kwargs.pop('rho', vp * 0.32 + 0.77)
+        psi2amp = kwargs.pop('psi2amp')
+        psi2azi = kwargs.pop('psi2azi')
+        c1 = psi2amp * np.cos(2*psi2azi)
+        c2 = psi2amp * np.sin(2*psi2azi)
 
         logL = 0
         for n, target in enumerate(self.targets):
-            target.moddata.calc_synth(h=h, vp=vp, vs=vs, rho=rho, **kwargs)
+            target.moddata.calc_synth(h=h, vp=vp, vs=vs, rho=rho,
+                                      c1=c1, c2=c2, **kwargs)
 
             if not target._moddata_valid():
                 self.proposallikelihood = -1e15
@@ -329,45 +480,40 @@ class JointTarget(object):
 
             target.calc_misfit()
 
-            size = target.obsdata.y.size
-            yerr = target.obsdata.yerr
-
-            corr, sigma = noise[2*n:2*n+2]
-            c_inv, logc_det = target.get_covariance(
-                sigma=sigma, size=size, yerr=yerr, corr=corr)
-
-            ydiff = target.moddata.y - target.obsdata.y
-            madist = (ydiff.T).dot(c_inv).dot(ydiff)
-            logL_part = -0.5 * (size * np.log(2*np.pi) + logc_det)
-            logL_target = (logL_part - madist / 2.)
-
-            logL += logL_target
+            target_noise = noise[4*n:4*n+4]
+            target.calc_likelihood(target_noise)
+            logL += target.valuation.likelihood
 
         self.proposallikelihood = logL
         self.proposalmisfits = self.get_misfits()
 
-    def plot_obsdata(self, ax=None, mod=False):
+    def plot_obsdata(self, ax=None, mod=False, aziamp=True):
         """Return subplot of all targets."""
         if len(self.targets) == 1:
             if ax is None:
-                fig, ax = plt.subplots(figsize=(7, 3.2))
+                ax = self.targets[0].plot(ax=ax, mod=mod, aziamp=aziamp)
+            if type(ax)==type(np.array([])):
+                fig = ax[0].figure
+                ax[0].legend()
             else:
                 fig = ax.figure
-
-            ax = self.targets[0].plot(ax=ax, mod=mod)
-            ax.legend()
+                ax.legend()
 
         else:
             if ax is None:
-                fig, ax = plt.subplots(self.ntargets,
-                                       figsize=(6, 3.2*self.ntargets))
+                fig, ax = plt.subplots(nrows=self.ntargets,ncols=3,
+                                       figsize=(20, 3.2*self.ntargets))
             else:
                 fig = ax[0].figure
 
             for i, target in enumerate(self.targets):
-                ax[i] = target.plot(ax=ax[i], mod=mod)
+                ax[i] = target.plot(ax=ax[i], mod=mod, aziamp=aziamp)
 
-            han, lab = ax[0].get_legend_handles_labels()
-            ax[0].legend(han, lab)
+            if len(ax.shape)>1:
+                han, lab = ax[0][0].get_legend_handles_labels()
+                ax[0][0].legend(han, lab)
+            else:
+                han, lab = ax[0].get_legend_handles_labels()
+                ax[0].legend(han, lab)
 
         return fig, ax

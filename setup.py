@@ -8,6 +8,8 @@ try:
 
     import numpy
 
+    from shutil import copyfile
+
 except ImportError:
     raise ImportError('Numpy needs to be installed or updated.')
 
@@ -15,11 +17,21 @@ except ImportError:
 extensions = [
     NumpyExtension(
         name='BayHunter.surfdisp96_ext',
-        sources=['src/extensions/surfdisp96.f'],
+        sources=['src/extensions/surf96aa.f'],
         extra_f77_compile_args='-O3 -ffixed-line-length-none -fbounds-check -m64'.split(),  # noqa
-        f2py_options=['only:', 'surfdisp96', ':'],
+        f2py_options=['only:', 'depthkernel', 'surfdisp96', ':'],
         language='f77'),
     ]
+
+# not working...
+#extensions.extend([
+#    NumpyExtension(
+#        name='BayHunter.dccurve_ext',
+#        sources=['src/extensions/dccurve.f'],
+#        extra_f77_compile_args=['-Lsrc/extensions/ -lQGpCoreWave'],
+#        f2py_options=[],
+#        language='f77'),
+#    ])
 
 extensions.extend(cythonize(
     Extension("BayHunter.rfmini", [
@@ -52,3 +64,9 @@ setup(
 
     ext_modules=extensions
 )
+
+try:
+    print("copying dccurve lib.")
+    copyfile("src/extensions/dccurve_ext.cpython-39-x86_64-linux-gnu.so","/home/emanuel/BIN/anaconda3/envs/py3/lib/python3.9/site-packages/BayHunter-2.1-py3.9-linux-x86_64.egg/BayHunter/dccurve_ext.cpython-39-x86_64-linux-gnu.so")
+except:
+    pass

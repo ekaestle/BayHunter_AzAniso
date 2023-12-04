@@ -57,7 +57,7 @@ c-----
      
         parameter(LER=0,LIN=5,LOT=6)
         integer NL, NL2, NLAY
-        parameter(NL=100,NLAY=100,NL2=NL+NL)
+        parameter(NL=200,NLAY=200,NL2=NL+NL)
         integer NP
         parameter (NP=60)
 
@@ -408,7 +408,7 @@ c         - 0 this is not the first period
 c             (this is to define period equation sign
 c              for mode jumping test)
 c-----
-        parameter (NL=100)
+        parameter (NL=200)
         real*8 wvno, omega, twopi
         real*8 c1, c2, cn, cm, dc, t1, clow
         real*8 dltar, del1, del2, del1st, plmn
@@ -506,7 +506,7 @@ c                 2 - Rayleigh Wave
 c     iflag   I*4 0 - Initialize
 c                 1 - Make model  for Love or Rayleigh Wave
 c-----
-        parameter(NL=100,NP=60)
+        parameter(NL=200,NP=60)
         real*4 d(NL),a(NL),b(NL),rho(NL),rtp(NL),dtp(NL),btp(NL)
         integer mmax,llw
 c        common/modl/ d,a,b,rho,rtp,dtp,btp
@@ -569,7 +569,7 @@ c     nev = 0 force interval halving
 c     nev = 1 permit neville iteration if conditions are proper
 c     nev = 2 neville iteration is being used
 c-----
-        parameter (NL=100,NP=60)
+        parameter (NL=200,NP=60)
         implicit double precision (a-h,o-z)
         real*4 d(NL),a(NL),b(NL),rho(NL),rtp(NL),dtp(NL),btp(NL)
         dimension x(20),y(20)
@@ -676,7 +676,7 @@ c     &  a0,cpcq,cpy,cpz,cqw,cqx,xy,xz,wy,wz)
         subroutine half(c1,c2,c3,del3,omega,ifunc,d,a,b,rho,rtp,dtp,btp,
      &  mmax,llw,twopi,a0,cpcq,cpy,cpz,cqw,cqx,xy,xz,wy,wz)
         implicit double precision (a-h,o-z)
-        parameter(NL=100)
+        parameter(NL=200)
         real*4 d(NL),a(NL),b(NL),rho(NL),rtp(NL),dtp(NL),btp(NL)    
         c3 = 0.5*(c1 + c2)
         wvno=omega/c3
@@ -692,7 +692,7 @@ c     &  a0,cpcq,cpy,cpz,cqw,cqx,xy,xz,wy,wz)
 c   control the way to P-SV or SH.
 c
         implicit double precision (a-h,o-z)
-        parameter(NL=100)
+        parameter(NL=200)
         real*4 d(NL),a(NL),b(NL),rho(NL),rtp(NL),dtp(NL),btp(NL)        
 c
         if(kk.eq.1)then
@@ -710,7 +710,7 @@ c
         function dltar1(wvno,omega,d,a,b,rho,rtp,dtp,btp,mmax,llw,twopi)
 c   find SH dispersion values.
 c
-        parameter (NL=100,NP=60)
+        parameter (NL=200,NP=60)
         implicit double precision (a-h,o-z)
         real*4 d(NL),a(NL),b(NL),rho(NL),rtp(NL),dtp(NL),btp(NL)
         integer llw,mmax
@@ -774,7 +774,7 @@ c
 c     &  a0,cpcq,cpy,cpz,cqw,cqx,xy,xz,wy,wz)
 c   find P-SV dispersion values.
 c
-        parameter (NL=100,NP=60)
+        parameter (NL=200,NP=60)
         implicit double precision (a-h,o-z)
         dimension e(5),ee(5),ca(5,5)
         real*4 d(NL),a(NL),b(NL),rho(NL),rtp(NL),dtp(NL),btp(NL)
